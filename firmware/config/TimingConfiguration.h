@@ -4,9 +4,9 @@
 
 namespace TimingConfiguration
 {
-    // Fetch cadence (seconds) limited by 4000 monthly requests to OpenSky
-    static const uint32_t FETCH_INTERVAL_SECONDS = 30; // seconds
+    // Increased to 60s to stay under $5 AeroAPI limit
+    static const uint32_t FETCH_INTERVAL_SECONDS = 60; 
 
-    // Display cycling configuration
-    static const uint32_t DISPLAY_CYCLE_SECONDS = 3; // seconds per flight when multiple flights
+    // As requested: Each flight stays on screen for 25 seconds
+    static const uint32_t DISPLAY_CYCLE_SECONDS = 25; 
 }

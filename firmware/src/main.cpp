@@ -57,54 +57,49 @@ void setup() {
 
 void loop() {
     unsigned long now = millis();
-    const unsigned long fetchIntervalMs = TimingConfiguration::FETCH_INTERVAL_SECONDS * 1000UL;
-    const unsigned long displayIntervalMs = TimingConfiguration::DISPLAY_CYCLE_SECONDS * 1000UL;
+    // 720s = 12 minutes. This is your "Money Saver" timer.
+    const unsigned long fetchIntervalMs = 720 * 1000UL; 
+    const unsigned long displayIntervalMs = 25 * 1000UL;
 
-    // --- TASK 1: FETCH DATA (Every 90 Seconds) ---
+    static std::vector<FlightInfo> g_currentFlights;
+    static int g_displayIndex = 0;
+
+    // --- 1. THE FETCH (The $0.02 moment) ---
     if (now - g_lastFetchMs >= fetchIntervalMs || g_lastFetchMs == 0) {
         g_lastFetchMs = now;
-
+        
         std::vector<StateVector> states;
         std::vector<FlightInfo> newFlights;
         
-        // This makes the AeroAPI call
-        size_t enriched = g_fetcher->fetchFlights(states, newFlights);
+        // Fetch everything nearby
+        g_fetcher->fetchFlights(states, newFlights);
         
-        if (enriched > 0) {
-            g_currentFlights = newFlights;
-            // Only reset index if we aren't mid-rotation
-            if (g_displayIndex >= g_currentFlights.size()) g_displayIndex = 0;
+        // LIMIT TO 8 BEST FLIGHTS (Closest to you)
+        if (newFlights.size() > 8) {
+            newFlights.resize(8);
         }
         
-        Serial.printf("API Fetch: %d flights enriched.\n", (int)enriched);
+        g_currentFlights = newFlights;
+        g_displayIndex = 0; // Start at the beginning of the new batch
+        Serial.println("New 12-minute batch loaded. Budget safe.");
     }
 
-    // --- TASK 2: ROTATE DISPLAY (Every 25 Seconds) ---
-    if (now - g_lastDisplayRotationMs >= displayIntervalMs || g_lastDisplayRotationMs == 0) {
+    // --- 2. THE ROTATION (The Free Part) ---
+    if (now - g_lastDisplayRotationMs >= displayIntervalMs) {
         g_lastDisplayRotationMs = now;
 
         if (!g_currentFlights.empty()) {
-            // Safety check for index
-            if (g_displayIndex >= g_currentFlights.size()) g_displayIndex = 0;
-
-            // Prepare a temporary vector containing ONLY the flight to show
+            // Pick the next flight in our cache of 8
             std::vector<FlightInfo> singleFlight;
             singleFlight.push_back(g_currentFlights[g_displayIndex]);
 
-            Serial.printf("Displaying Flight %d/%d: %s\n", 
-                          g_displayIndex + 1, 
-                          (int)g_currentFlights.size(), 
-                          g_currentFlights[g_displayIndex].ident.c_str());
-
             g_display.displayFlights(singleFlight);
 
-            // Increment for next cycle
+            // Move to next (1 through 8) and loop back
             g_displayIndex = (g_displayIndex + 1) % g_currentFlights.size();
         } else {
-            // No flights in range
-            g_display.displayMessage("Scanning...");
+            g_display.displayMessage("Sky Clear");
         }
     }
-
-    delay(50); // General stability
+    delay(50);
 }

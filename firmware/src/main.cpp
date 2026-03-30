@@ -1,12 +1,7 @@
 /*
-Purpose: Firmware entry point for ESP32.
-Responsibilities:
-- Initialize serial, mount LittleFS (logo store), connect to Wi-Fi.
-- Construct fetchers, logo store, and display.
-- Periodically fetch state vectors (OpenSky), enrich flights (AeroAPI), and render.
-Configuration: UserConfiguration (location/filters/colors), TimingConfiguration (intervals),
-               WiFiConfiguration (SSID/password), HardwareConfiguration (display specs).
-Logo data:     Upload via 'pio run --target uploadfs' after running tools/build_logos.py.
+Modified FlightWall Firmware
+- Optimized for <$5 AeroAPI usage.
+- 25-second per-flight display rotation.
 */
 #include <vector>
 #include <WiFi.h>
@@ -21,100 +16,95 @@ Logo data:     Upload via 'pio run --target uploadfs' after running tools/build_
 #include "core/FlightDataFetcher.h"
 #include "adapters/NeoMatrixDisplay.h"
 
-static OpenSkyFetcher   g_openSky;
-static AeroAPIFetcher   g_aeroApi;
-static LocalLogoStore   g_logoStore;
+static OpenSkyFetcher    g_openSky;
+static AeroAPIFetcher    g_aeroApi;
+static LocalLogoStore    g_logoStore;
 static FlightDataFetcher *g_fetcher = nullptr;
-static NeoMatrixDisplay g_display;
+static NeoMatrixDisplay  g_display;
 
 static unsigned long g_lastFetchMs = 0;
+static unsigned long g_lastDisplayRotationMs = 0;
 
-void setup()
-{
+// Global storage for rotation
+static std::vector<FlightInfo> g_currentFlights;
+static int g_displayIndex = 0;
+
+void setup() {
     Serial.begin(115200);
     delay(200);
 
     g_display.initialize();
     g_display.displayMessage(String("FlightWall"));
-
-    // Mount LittleFS for local logo storage.
-    // Failure is non-fatal — logo display is simply skipped.
     g_logoStore.initialize();
 
-    if (strlen(WiFiConfiguration::WIFI_SSID) > 0)
-    {
+    if (strlen(WiFiConfiguration::WIFI_SSID) > 0) {
         WiFi.mode(WIFI_STA);
-        g_display.displayMessage(String("WiFi: ") + WiFiConfiguration::WIFI_SSID);
         WiFi.begin(WiFiConfiguration::WIFI_SSID, WiFiConfiguration::WIFI_PASSWORD);
-        Serial.print("Connecting to WiFi");
         int attempts = 0;
-        while (WiFi.status() != WL_CONNECTED && attempts < 50)
-        {
+        while (WiFi.status() != WL_CONNECTED && attempts < 50) {
             delay(200);
-            Serial.print(".");
             attempts++;
         }
-        Serial.println();
-        if (WiFi.status() == WL_CONNECTED)
-        {
-            Serial.print("WiFi connected: ");
-            Serial.println(WiFi.localIP());
-            g_display.displayMessage(String("WiFi OK ") + WiFi.localIP().toString());
-            delay(3000);
+        if (WiFi.status() == WL_CONNECTED) {
+            g_display.displayMessage(String("WiFi OK"));
+            delay(1000);
             g_display.showLoading();
-        }
-        else
-        {
-            Serial.println("WiFi not connected; proceeding without network");
-            g_display.displayMessage(String("WiFi FAIL"));
         }
     }
 
     g_fetcher = new FlightDataFetcher(&g_openSky, &g_aeroApi, &g_logoStore);
 }
 
-void loop()
-{
-    const unsigned long intervalMs = TimingConfiguration::FETCH_INTERVAL_SECONDS * 1000UL;
-    const unsigned long now = millis();
-    if (now - g_lastFetchMs >= intervalMs)
-    {
+void loop() {
+    unsigned long now = millis();
+    const unsigned long fetchIntervalMs = TimingConfiguration::FETCH_INTERVAL_SECONDS * 1000UL;
+    const unsigned long displayIntervalMs = TimingConfiguration::DISPLAY_CYCLE_SECONDS * 1000UL;
+
+    // --- TASK 1: FETCH DATA (Every 90 Seconds) ---
+    if (now - g_lastFetchMs >= fetchIntervalMs || g_lastFetchMs == 0) {
         g_lastFetchMs = now;
 
         std::vector<StateVector> states;
-        std::vector<FlightInfo> flights;
-        size_t enriched = g_fetcher->fetchFlights(states, flights);
-
-        Serial.print("OpenSky state vectors: ");
-        Serial.println((int)states.size());
-        Serial.print("AeroAPI enriched flights: ");
-        Serial.println((int)enriched);
-
-        for (const auto &s : states)
-        {
-            Serial.print(" ");
-            Serial.print(s.callsign);
-            Serial.print(" @ ");
-            Serial.print(s.distance_km, 1);
-            Serial.print("km bearing ");
-            Serial.println(s.bearing_deg, 1);
+        std::vector<FlightInfo> newFlights;
+        
+        // This makes the AeroAPI call
+        size_t enriched = g_fetcher->fetchFlights(states, newFlights);
+        
+        if (enriched > 0) {
+            g_currentFlights = newFlights;
+            // Only reset index if we aren't mid-rotation
+            if (g_displayIndex >= g_currentFlights.size()) g_displayIndex = 0;
         }
-
-        for (const auto &f : flights)
-        {
-            Serial.println("=== FLIGHT INFO ===");
-            Serial.print("Ident: ");        Serial.println(f.ident);
-            Serial.print("Airline: ");      Serial.println(f.airline_display_name_full);
-            Serial.print("Aircraft: ");     Serial.println(f.aircraft_display_name_short.length()
-                                                           ? f.aircraft_display_name_short
-                                                           : f.aircraft_code);
-            Serial.printf("Origin: %s (%s) %s\n", f.origin.code_iata.c_str(), f.origin.code_icao.c_str(), f.origin.name.c_str());
-            Serial.printf("Destination: %s (%s) %s\n", f.destination.code_iata.c_str(), f.destination.code_icao.c_str(), f.destination.name.c_str());
-            Serial.print("Logo pixels: ");  Serial.println((int)f.airline_logo_rgb565.size());
-            Serial.println("===================");
-        }
-
-        g_display.displayFlights(flights);
+        
+        Serial.printf("API Fetch: %d flights enriched.\n", (int)enriched);
     }
-    delay(10);
+
+    // --- TASK 2: ROTATE DISPLAY (Every 25 Seconds) ---
+    if (now - g_lastDisplayRotationMs >= displayIntervalMs || g_lastDisplayRotationMs == 0) {
+        g_lastDisplayRotationMs = now;
+
+        if (!g_currentFlights.empty()) {
+            // Safety check for index
+            if (g_displayIndex >= g_currentFlights.size()) g_displayIndex = 0;
+
+            // Prepare a temporary vector containing ONLY the flight to show
+            std::vector<FlightInfo> singleFlight;
+            singleFlight.push_back(g_currentFlights[g_displayIndex]);
+
+            Serial.printf("Displaying Flight %d/%d: %s\n", 
+                          g_displayIndex + 1, 
+                          (int)g_currentFlights.size(), 
+                          g_currentFlights[g_displayIndex].ident.c_str());
+
+            g_display.displayFlights(singleFlight);
+
+            // Increment for next cycle
+            g_displayIndex = (g_displayIndex + 1) % g_currentFlights.size();
+        } else {
+            // No flights in range
+            g_display.displayMessage("Scanning...");
+        }
+    }
+
+    delay(50); // General stability
 }
